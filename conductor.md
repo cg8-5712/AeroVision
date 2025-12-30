@@ -9,10 +9,11 @@
 1. [项目目标](#项目目标)
 2. [环境配置](#环境配置)
 3. [数据规范](#数据规范)
-4. [目录结构](#目录结构)
-5. [训练阶段](#训练阶段)
-6. [评估指标](#评估指标)
-7. [常见问题](#常见问题)
+4. [人工数据标注](#人工数据标注) ⭐ 新增
+5. [目录结构](#目录结构)
+6. [训练阶段](#训练阶段)
+7. [评估指标](#评估指标)
+8. [常见问题](#常见问题)
 
 ---
 
@@ -114,16 +115,29 @@ print("Environment OK!")
 
 ### 标注格式
 
-#### 机型+航司标注 (CSV)
+#### 主标注文件 (CSV)
 
 ```csv
 # labels/aircraft_labels.csv
-filename,type_id,type_name,airline_id,airline_name,quality_score
-A320_0001.jpg,0,A320,5,China Eastern,1.0
-B737_0002.jpg,1,B737-800,3,Air China,0.85
-A380_0003.jpg,7,A380,12,Emirates,1.0
-B787_0004.jpg,4,B787-9,,,,0.7
+filename,type_id,type_name,airline_id,airline_name,registration,quality
+IMG_0001.jpg,0,A320,1,China Eastern,B-1234,1.0
+IMG_0002.jpg,1,B737-800,0,Air China,B-5678,0.9
+IMG_0003.jpg,7,A380,8,Emirates,A6-EDA,1.0
+IMG_0004.jpg,4,B787-9,3,Hainan Airlines,,0.7
+IMG_0005.jpg,,,,,B-9999,0.3
 ```
+
+#### 字段说明
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `filename` | string | ✅ | 图片文件名 |
+| `type_id` | int | ❌ | 机型ID（自动生成） |
+| `type_name` | string | ✅ | 机型名称，如 `A320`、`Unknown` |
+| `airline_id` | int | ❌ | 航司ID（自动生成） |
+| `airline_name` | string | ❌ | 航司名称，如 `China Eastern` |
+| `registration` | string | ❌ | 注册号文字，如 `B-1234`，不可见则留空 |
+| `quality` | float | ✅ | 图片质量 0.0-1.0（1.0=清晰，0.5=一般，0.3=模糊） |
 
 #### 类别映射 (JSON)
 
@@ -167,15 +181,28 @@ B787_0004.jpg,4,B787-9,,,,0.7
 }
 ```
 
-#### 注册号标注 (YOLO 格式 + OCR)
+#### 注册号标注 (YOLO 格式)
+
+注册号位置用 YOLO 格式存储，文件名与图片对应：
 
 ```
-# labels/registration/B-1234_bbox.txt
-# class x_center y_center width height
-0 0.85 0.65 0.12 0.04
+图片: data/processed/aircraft_crop/unsorted/IMG_0001.jpg
+标注: data/labels/registration/IMG_0001.txt
 
-# labels/registration/B-1234_ocr.txt
-B-1234
+# IMG_0001.txt 内容 (YOLO格式: class x_center y_center width height)
+0 0.85 0.65 0.12 0.04
+```
+
+**注意：**
+- 文件名与图片同名，只是扩展名从 `.jpg` 改为 `.txt`
+- 注册号**文字**存在 CSV 的 `registration` 列，不需要单独的 `_ocr.txt`
+- 如果图片中注册号不可见，则不创建对应的 `.txt` 文件
+- 一张图可以有多个注册号框（多行）
+
+```
+# 示例：IMG_0005.txt (机身有两处注册号)
+0 0.25 0.55 0.10 0.03
+0 0.82 0.48 0.08 0.025
 ```
 
 ### 数据质量要求
@@ -187,6 +214,1111 @@ B-1234
 | 清晰度 | 无明显模糊 | Laplacian 方差 |
 | 遮挡 | 主体遮挡 < 20% | 人工抽检 |
 | 标注准确 | 机型正确 | 人工抽检 10% |
+
+---
+
+## 人工数据标注
+
+> **数据标注质量直接决定模型上限，这是最值得投入时间的环节**
+
+### 标注方案选择
+
+| 方案 | 优点 | 缺点 | 适用场景 |
+|------|------|------|----------|
+| **Label Studio** | 开箱即用、功能完整、支持团队 | 导出需转换、定制性一般 | 快速启动、小团队 |
+| **自研 Web 服务** | 完全定制、格式直出、可集成业务 | 需要开发时间 | 长期项目、特殊需求 |
+
+---
+
+### 方案一：Label Studio（推荐快速启动）
+
+#### 1. 安装与启动
+
+```bash
+pip install label-studio
+label-studio start --port 8080
+```
+
+浏览器打开 `http://localhost:8080`
+
+#### 2. 创建项目配置
+
+新建项目时，粘贴以下 XML 配置：
+
+```xml
+<View>
+  <Image name="image" value="$image" zoom="true"/>
+
+  <!-- 机型分类 -->
+  <Header value="机型 Aircraft Type"/>
+  <Choices name="type_name" toName="image" choice="single" required="true">
+    <Choice value="A320"/><Choice value="A321"/>
+    <Choice value="A330-300"/><Choice value="A350-900"/><Choice value="A380"/>
+    <Choice value="B737-800"/><Choice value="B747-400"/>
+    <Choice value="B777-300ER"/><Choice value="B787-9"/>
+    <Choice value="ARJ21"/><Choice value="C919"/>
+    <Choice value="Unknown"/>
+  </Choices>
+
+  <!-- 航司分类 -->
+  <Header value="航空公司 Airline"/>
+  <Choices name="airline_name" toName="image" choice="single" required="true">
+    <Choice value="Air China"/><Choice value="China Eastern"/>
+    <Choice value="China Southern"/><Choice value="Hainan Airlines"/>
+    <Choice value="Xiamen Airlines"/><Choice value="Spring Airlines"/>
+    <Choice value="Cathay Pacific"/><Choice value="Singapore Airlines"/>
+    <Choice value="Emirates"/><Choice value="Other"/><Choice value="Unknown"/>
+  </Choices>
+
+  <!-- 图片质量 (滑块 0-1) -->
+  <Header value="图片质量 Quality (0=模糊, 1=清晰)"/>
+  <Rating name="quality" toName="image" maxRating="10" icon="star" size="medium"/>
+
+  <!-- 注册号边界框 -->
+  <Header value="注册号区域 Registration Area"/>
+  <RectangleLabels name="reg_bbox" toName="image">
+    <Label value="registration" background="#FF0000"/>
+  </RectangleLabels>
+
+  <!-- 注册号文字 -->
+  <Header value="注册号 Registration Number"/>
+  <TextArea name="registration" toName="image" placeholder="B-1234" maxSubmissions="1"/>
+</View>
+```
+
+#### 3. 导入图片
+
+```bash
+# 方式1: 直接上传文件夹
+# 方式2: 生成导入 JSON
+python -c "
+import json
+from pathlib import Path
+images = [{'image': f'/data/local-files/?d=images/{p.name}'}
+          for p in Path('data/processed/aircraft_crop/unsorted').glob('*.jpg')]
+print(json.dumps(images, indent=2))
+" > import.json
+```
+
+#### 4. 导出并转换格式
+
+```python
+# scripts/convert_labelstudio.py
+"""Label Studio 导出转换为训练格式"""
+import json
+import pandas as pd
+from pathlib import Path
+
+def convert_labelstudio_export(export_json: str, output_dir: str):
+    with open(export_json, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    output_path = Path(output_dir)
+    (output_path / "registration").mkdir(parents=True, exist_ok=True)
+
+    records = []
+
+    for item in data:
+        filename = Path(item['data']['image']).name
+        results = item.get('annotations', [{}])[0].get('result', [])
+
+        record = {'filename': filename, 'type_name': '', 'airline_name': '',
+                  'registration': '', 'quality': 1.0}
+        bboxes = []
+
+        for r in results:
+            if r['type'] == 'choices':
+                if r['from_name'] == 'type_name':
+                    record['type_name'] = r['value']['choices'][0]
+                elif r['from_name'] == 'airline_name':
+                    record['airline_name'] = r['value']['choices'][0]
+            elif r['type'] == 'rating':
+                record['quality'] = r['value']['rating'] / 10.0  # 转为 0-1
+            elif r['type'] == 'textarea' and r['from_name'] == 'registration':
+                text = r['value']['text'][0] if r['value']['text'] else ''
+                record['registration'] = text.upper().replace(' ', '')
+            elif r['type'] == 'rectanglelabels':
+                x, y = r['value']['x'] / 100, r['value']['y'] / 100
+                w, h = r['value']['width'] / 100, r['value']['height'] / 100
+                bboxes.append(f"0 {x + w/2:.6f} {y + h/2:.6f} {w:.6f} {h:.6f}")
+
+        records.append(record)
+
+        # 保存 YOLO 格式 bbox
+        if bboxes:
+            txt_path = output_path / "registration" / (Path(filename).stem + ".txt")
+            txt_path.write_text('\n'.join(bboxes))
+
+    # 生成 ID 映射
+    df = pd.DataFrame(records)
+    types = sorted(df['type_name'].dropna().unique())
+    airlines = sorted(df['airline_name'].dropna().unique())
+    df['type_id'] = df['type_name'].map({t: i for i, t in enumerate(types)})
+    df['airline_id'] = df['airline_name'].map({a: i for i, a in enumerate(airlines)})
+
+    # 保存
+    df[['filename','type_id','type_name','airline_id','airline_name','registration','quality']].to_csv(
+        output_path / "aircraft_labels.csv", index=False)
+
+    print(f"✅ 转换完成: {len(records)} 条记录")
+
+if __name__ == "__main__":
+    convert_labelstudio_export("export.json", "data/labels")
+```
+
+---
+
+### 方案二：自研 Web 标注服务
+
+适合需要深度定制、长期使用的场景。
+
+#### 1. 技术架构
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      前端 (Vue/React)                        │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐           │
+│  │图片显示  │ │分类选择  │ │画框工具  │ │文字输入  │           │
+│  └─────────┘ └─────────┘ └─────────┘ └─────────┘           │
+└─────────────────────────────────────────────────────────────┘
+                            │ REST API
+┌─────────────────────────────────────────────────────────────┐
+│                    后端 (FastAPI/Flask)                      │
+│  GET /api/images/next     获取下一张待标注图片                │
+│  POST /api/annotations    保存标注结果                       │
+│  GET /api/progress        获取标注进度                       │
+│  GET /api/export          导出标注数据                       │
+└─────────────────────────────────────────────────────────────┘
+                            │
+┌─────────────────────────────────────────────────────────────┐
+│                    存储 (SQLite/PostgreSQL)                  │
+│  images 表: id, filename, status                            │
+│  annotations 表: image_id, type, airline, reg, quality, bbox│
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### 2. 后端核心代码
+
+```python
+# annotation_server/main.py
+from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from pathlib import Path
+import sqlite3
+import json
+
+app = FastAPI(title="Aircraft Annotation Service")
+
+# 配置
+IMAGE_DIR = Path("data/processed/aircraft_crop/unsorted")
+DB_PATH = "data/labels/annotations.db"
+
+# 数据模型
+class Annotation(BaseModel):
+    filename: str
+    type_name: str
+    airline_name: str = ""
+    registration: str = ""
+    quality: float = 1.0
+    bbox: list = []  # [[x_center, y_center, width, height], ...]
+
+# 初始化数据库
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('''CREATE TABLE IF NOT EXISTS annotations (
+        filename TEXT PRIMARY KEY,
+        type_name TEXT,
+        airline_name TEXT,
+        registration TEXT,
+        quality REAL,
+        bbox TEXT,
+        annotated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# 静态文件服务（图片）
+app.mount("/images", StaticFiles(directory=str(IMAGE_DIR)), name="images")
+
+@app.get("/api/images/next")
+def get_next_image():
+    """获取下一张待标注图片"""
+    conn = sqlite3.connect(DB_PATH)
+    annotated = set(row[0] for row in conn.execute("SELECT filename FROM annotations"))
+    conn.close()
+
+    for img in sorted(IMAGE_DIR.glob("*.jpg")):
+        if img.name not in annotated:
+            return {
+                "filename": img.name,
+                "url": f"/images/{img.name}",
+                "total": len(list(IMAGE_DIR.glob("*.jpg"))),
+                "done": len(annotated)
+            }
+    return {"filename": None, "message": "All images annotated!"}
+
+@app.post("/api/annotations")
+def save_annotation(ann: Annotation):
+    """保存标注"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('''INSERT OR REPLACE INTO annotations
+        (filename, type_name, airline_name, registration, quality, bbox)
+        VALUES (?, ?, ?, ?, ?, ?)''',
+        (ann.filename, ann.type_name, ann.airline_name,
+         ann.registration, ann.quality, json.dumps(ann.bbox)))
+    conn.commit()
+    conn.close()
+    return {"status": "ok"}
+
+@app.get("/api/progress")
+def get_progress():
+    """获取标注进度"""
+    conn = sqlite3.connect(DB_PATH)
+    done = conn.execute("SELECT COUNT(*) FROM annotations").fetchone()[0]
+    conn.close()
+    total = len(list(IMAGE_DIR.glob("*.jpg")))
+    return {"done": done, "total": total, "percent": f"{100*done/total:.1f}%"}
+
+@app.get("/api/export")
+def export_annotations():
+    """导出为 CSV + YOLO 格式"""
+    import pandas as pd
+
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql("SELECT * FROM annotations", conn)
+    conn.close()
+
+    # 生成 type_id 和 airline_id
+    types = sorted(df['type_name'].dropna().unique())
+    airlines = sorted(df['airline_name'].dropna().unique())
+    df['type_id'] = df['type_name'].map({t: i for i, t in enumerate(types)})
+    df['airline_id'] = df['airline_name'].map({a: i for i, a in enumerate(airlines)})
+
+    # 保存 CSV
+    output_dir = Path("data/labels")
+    df[['filename','type_id','type_name','airline_id','airline_name','registration','quality']].to_csv(
+        output_dir / "aircraft_labels.csv", index=False)
+
+    # 保存 YOLO bbox
+    bbox_dir = output_dir / "registration"
+    bbox_dir.mkdir(exist_ok=True)
+    for _, row in df.iterrows():
+        bboxes = json.loads(row['bbox']) if row['bbox'] else []
+        if bboxes:
+            txt_path = bbox_dir / (Path(row['filename']).stem + ".txt")
+            lines = [f"0 {b[0]:.6f} {b[1]:.6f} {b[2]:.6f} {b[3]:.6f}" for b in bboxes]
+            txt_path.write_text('\n'.join(lines))
+
+    return {"status": "exported", "count": len(df)}
+
+@app.get("/api/config")
+def get_config():
+    """返回标注选项配置"""
+    return {
+        "types": ["A320", "A321", "A330-300", "A350-900", "A380",
+                  "B737-800", "B747-400", "B777-300ER", "B787-9",
+                  "ARJ21", "C919", "Unknown"],
+        "airlines": ["Air China", "China Eastern", "China Southern",
+                     "Hainan Airlines", "Xiamen Airlines", "Spring Airlines",
+                     "Cathay Pacific", "Singapore Airlines", "Emirates",
+                     "Other", "Unknown"]
+    }
+
+# 启动: uvicorn annotation_server.main:app --reload --port 8000
+```
+
+#### 3. 前端核心代码（Vue 3 示例）
+
+```html
+<!-- annotation_web/index.html -->
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Aircraft Annotation Tool</title>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+  <style>
+    body { font-family: Arial; margin: 20px; }
+    .container { display: flex; gap: 20px; }
+    .image-panel { flex: 2; position: relative; }
+    .image-panel img { max-width: 100%; cursor: crosshair; }
+    .control-panel { flex: 1; }
+    .bbox { position: absolute; border: 2px solid red; background: rgba(255,0,0,0.1); }
+    select, input, button { width: 100%; padding: 8px; margin: 5px 0; }
+    button { background: #4CAF50; color: white; border: none; cursor: pointer; }
+    .progress { background: #e0e0e0; height: 20px; margin: 10px 0; }
+    .progress-bar { background: #4CAF50; height: 100%; }
+    .quality-slider { width: 100%; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <h2>Aircraft Annotation Tool</h2>
+    <div class="progress">
+      <div class="progress-bar" :style="{width: progress.percent}"></div>
+    </div>
+    <p>进度: {{ progress.done }} / {{ progress.total }} ({{ progress.percent }})</p>
+
+    <div class="container">
+      <!-- 图片面板 -->
+      <div class="image-panel" @mousedown="startDraw" @mousemove="drawing" @mouseup="endDraw">
+        <img :src="imageUrl" ref="img" v-if="currentImage">
+        <div v-for="(box, i) in bboxes" :key="i" class="bbox"
+             :style="{left: box.x+'%', top: box.y+'%', width: box.w+'%', height: box.h+'%'}">
+          <span style="color:red;font-size:12px">{{ i+1 }}</span>
+        </div>
+      </div>
+
+      <!-- 控制面板 -->
+      <div class="control-panel">
+        <label>机型 Type</label>
+        <select v-model="annotation.type_name">
+          <option v-for="t in config.types" :value="t">{{ t }}</option>
+        </select>
+
+        <label>航司 Airline</label>
+        <select v-model="annotation.airline_name">
+          <option v-for="a in config.airlines" :value="a">{{ a }}</option>
+        </select>
+
+        <label>注册号 Registration</label>
+        <input v-model="annotation.registration" placeholder="B-1234">
+
+        <label>质量 Quality: {{ annotation.quality.toFixed(1) }}</label>
+        <input type="range" class="quality-slider" v-model.number="annotation.quality"
+               min="0" max="1" step="0.1">
+
+        <p>边界框: {{ bboxes.length }} 个 (在图上拖拽绘制)</p>
+        <button @click="clearBoxes">清除边界框</button>
+
+        <hr>
+        <button @click="submit" :disabled="!annotation.type_name">
+          提交并下一张 (Enter)
+        </button>
+        <button @click="skip" style="background:#ff9800">跳过 (S)</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const { createApp, ref, reactive, onMounted } = Vue
+
+    createApp({
+      setup() {
+        const config = ref({ types: [], airlines: [] })
+        const progress = ref({ done: 0, total: 0, percent: '0%' })
+        const currentImage = ref(null)
+        const imageUrl = ref('')
+        const annotation = reactive({
+          type_name: '', airline_name: '', registration: '', quality: 1.0
+        })
+        const bboxes = ref([])
+        const isDrawing = ref(false)
+        const startPos = ref({ x: 0, y: 0 })
+
+        // 加载配置
+        async function loadConfig() {
+          const res = await fetch('/api/config')
+          config.value = await res.json()
+        }
+
+        // 加载下一张图片
+        async function loadNext() {
+          const res = await fetch('/api/images/next')
+          const data = await res.json()
+          if (data.filename) {
+            currentImage.value = data.filename
+            imageUrl.value = data.url
+            progress.value = { done: data.done, total: data.total,
+                              percent: (100 * data.done / data.total).toFixed(1) + '%' }
+            // 重置表单
+            annotation.type_name = ''
+            annotation.airline_name = ''
+            annotation.registration = ''
+            annotation.quality = 1.0
+            bboxes.value = []
+          } else {
+            alert('所有图片已标注完成!')
+          }
+        }
+
+        // 绘制边界框
+        function startDraw(e) {
+          const rect = e.target.getBoundingClientRect()
+          startPos.value = {
+            x: (e.clientX - rect.left) / rect.width * 100,
+            y: (e.clientY - rect.top) / rect.height * 100
+          }
+          isDrawing.value = true
+        }
+
+        function drawing(e) {
+          // 可以添加实时预览
+        }
+
+        function endDraw(e) {
+          if (!isDrawing.value) return
+          isDrawing.value = false
+
+          const rect = e.target.getBoundingClientRect()
+          const endX = (e.clientX - rect.left) / rect.width * 100
+          const endY = (e.clientY - rect.top) / rect.height * 100
+
+          const x = Math.min(startPos.value.x, endX)
+          const y = Math.min(startPos.value.y, endY)
+          const w = Math.abs(endX - startPos.value.x)
+          const h = Math.abs(endY - startPos.value.y)
+
+          if (w > 1 && h > 1) {  // 最小尺寸
+            bboxes.value.push({ x, y, w, h })
+          }
+        }
+
+        function clearBoxes() {
+          bboxes.value = []
+        }
+
+        // 提交标注
+        async function submit() {
+          if (!annotation.type_name) {
+            alert('请选择机型')
+            return
+          }
+
+          // 转换 bbox 为 YOLO 格式 (中心点 + 宽高，归一化)
+          const yoloBboxes = bboxes.value.map(b => [
+            (b.x + b.w / 2) / 100,
+            (b.y + b.h / 2) / 100,
+            b.w / 100,
+            b.h / 100
+          ])
+
+          await fetch('/api/annotations', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              filename: currentImage.value,
+              type_name: annotation.type_name,
+              airline_name: annotation.airline_name,
+              registration: annotation.registration.toUpperCase().replace(/\s/g, ''),
+              quality: annotation.quality,
+              bbox: yoloBboxes
+            })
+          })
+
+          loadNext()
+        }
+
+        function skip() {
+          loadNext()
+        }
+
+        // 键盘快捷键
+        document.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') submit()
+          if (e.key === 's' || e.key === 'S') skip()
+        })
+
+        onMounted(() => {
+          loadConfig()
+          loadNext()
+        })
+
+        return { config, progress, currentImage, imageUrl, annotation,
+                 bboxes, startDraw, drawing, endDraw, clearBoxes, submit, skip }
+      }
+    }).mount('#app')
+  </script>
+</body>
+</html>
+```
+
+#### 4. 启动服务
+
+```bash
+# 目录结构
+annotation_server/
+├── main.py              # FastAPI 后端
+└── static/
+    └── index.html       # 前端页面
+
+# 启动
+cd annotation_server
+uvicorn main:app --reload --port 8000
+
+# 访问 http://localhost:8000/static/index.html
+```
+
+---
+
+### 标注界面效果
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│  Aircraft Annotation Tool                                       │
+│  ████████████████░░░░░░░░░░░░░░  进度: 156 / 500 (31.2%)       │
+├────────────────────────────────┬───────────────────────────────┤
+│                                │  机型 Type                     │
+│    ┌──────────────────┐        │  [A320           ▼]           │
+│    │                  │        │                               │
+│    │   ✈️ 飞机图片     │        │  航司 Airline                 │
+│    │                  │        │  [China Eastern  ▼]           │
+│    │    ┌────────┐    │        │                               │
+│    │    │B-1234  │ ←框│        │  注册号 Registration           │
+│    │    └────────┘    │        │  [B-1234        ]             │
+│    │                  │        │                               │
+│    └──────────────────┘        │  质量 Quality: 0.9             │
+│                                │  ○────────●──○  [==========]  │
+│                                │                               │
+│                                │  边界框: 1 个                  │
+│                                │  [清除边界框]                  │
+│                                │  ─────────────                │
+│                                │  [提交并下一张 (Enter)]        │
+│                                │  [跳过 (S)]                    │
+└────────────────────────────────┴───────────────────────────────┘
+```
+
+---
+
+### 标注流程总览
+
+```
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│  1. 数据收集 │ → │  2. 预处理   │ → │  3. 人工标注 │ → │  4. 质量审核 │
+└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
+                                              ↓                  ↓
+                                      ┌─────────────┐    ┌─────────────┐
+                                      │  5. 导出格式 │ ← │  6. 修正返工 │
+                                      └─────────────┘    └─────────────┘
+```
+
+### 阶段 1：数据收集与预处理
+
+#### 1.1 图片下载与命名
+
+```python
+# scripts/download_images.py
+import requests
+from pathlib import Path
+import hashlib
+
+def download_and_rename(url: str, save_dir: str, prefix: str = ""):
+    """下载图片并用 hash 重命名避免重复"""
+    response = requests.get(url, timeout=30)
+    if response.status_code == 200:
+        # 用内容 hash 作为文件名
+        content_hash = hashlib.md5(response.content).hexdigest()[:12]
+        filename = f"{prefix}_{content_hash}.jpg" if prefix else f"{content_hash}.jpg"
+
+        save_path = Path(save_dir) / filename
+        save_path.write_bytes(response.content)
+        return str(save_path)
+    return None
+```
+
+#### 1.2 创建待标注清单
+
+```python
+# scripts/create_annotation_list.py
+import pandas as pd
+from pathlib import Path
+
+def create_annotation_csv(image_dir: str, output_csv: str):
+    """创建待标注的 CSV 文件"""
+    image_dir = Path(image_dir)
+
+    records = []
+    for img_path in sorted(image_dir.glob("*.jpg")):
+        records.append({
+            "filename": img_path.name,
+            "type_name": "",        # 待填写
+            "airline_name": "",     # 待填写
+            "registration": "",     # 待填写
+            "quality": "",          # 待填写: good/medium/poor
+            "annotator": "",        # 标注人
+            "verified": False,      # 是否已审核
+            "notes": ""             # 备注
+        })
+
+    df = pd.DataFrame(records)
+    df.to_csv(output_csv, index=False, encoding="utf-8-sig")  # utf-8-sig 支持 Excel 直接打开
+    print(f"Created annotation file: {output_csv} ({len(records)} images)")
+
+if __name__ == "__main__":
+    create_annotation_csv(
+        image_dir="data/processed/aircraft_crop/unsorted",
+        output_csv="data/labels/annotation_todo.csv"
+    )
+```
+
+### 阶段 2：机型/航司分类标注
+
+#### 2.1 标注指南
+
+```markdown
+## 机型标注规范
+
+### 命名规则
+- 使用 ICAO 型号代码简写
+- 同系列不同型号分开标注
+- 示例：
+  - ✅ B737-800（具体型号）
+  - ❌ B737（太笼统）
+  - ✅ A320-200
+  - ✅ A320neo（新发动机型号单独分类）
+
+### 常见易混淆机型
+| 机型 A | 机型 B | 区分方法 |
+|--------|--------|----------|
+| A320 | A321 | A321 更长，看舱门数量 |
+| B737-800 | B737-900 | 900 更长，看紧急出口位置 |
+| A330-200 | A330-300 | 300 更长 |
+| B777-200 | B777-300 | 300 明显更长 |
+| A350-900 | A350-1000 | 1000 更长，看起落架舱门 |
+
+### 标注原则
+1. **不确定就标"Unknown"** - 宁缺毋滥
+2. **参考注册号查询** - 用 flightradar24.com 或 planespotters.net
+3. **看翼尖小翼形状** - 不同机型小翼设计不同
+4. **看发动机数量和位置** - 双发/四发，翼下/尾部
+```
+
+#### 2.2 标注工具：Excel 批量标注
+
+```
+推荐工作流：
+
+1. 打开 annotation_todo.csv
+2. 使用图片查看器（如 IrfanView）批量预览图片
+3. 在 Excel 中逐行填写：
+   - type_name: 机型名称
+   - airline_name: 航空公司
+   - registration: 注册号（如果可见）
+   - quality: good / medium / poor
+4. 每 100 张保存一次
+5. 填写 annotator 字段（你的名字）
+```
+
+#### 2.3 辅助标注脚本（图片+表格联动）
+
+```python
+# scripts/annotation_helper.py
+"""
+简易标注辅助工具：显示图片 + 输入标签
+"""
+import pandas as pd
+from pathlib import Path
+from PIL import Image
+import matplotlib.pyplot as plt
+
+class AnnotationHelper:
+    def __init__(self, csv_path: str, image_dir: str):
+        self.csv_path = csv_path
+        self.image_dir = Path(image_dir)
+        self.df = pd.read_csv(csv_path)
+        self.current_idx = self._find_first_unlabeled()
+
+        # 预定义选项
+        self.type_options = [
+            "A320", "A321", "A330-300", "A350-900", "A380",
+            "B737-800", "B747-400", "B777-300ER", "B787-9",
+            "ARJ21", "C919", "Unknown"
+        ]
+        self.airline_options = [
+            "Air China", "China Eastern", "China Southern",
+            "Hainan Airlines", "Xiamen Airlines", "Spring Airlines",
+            "Cathay Pacific", "Singapore Airlines", "Emirates",
+            "Unknown"
+        ]
+
+    def _find_first_unlabeled(self) -> int:
+        """找到第一个未标注的图片"""
+        for idx, row in self.df.iterrows():
+            if pd.isna(row["type_name"]) or row["type_name"] == "":
+                return idx
+        return len(self.df)
+
+    def show_current(self):
+        """显示当前图片"""
+        if self.current_idx >= len(self.df):
+            print("All images annotated!")
+            return
+
+        row = self.df.iloc[self.current_idx]
+        img_path = self.image_dir / row["filename"]
+
+        plt.figure(figsize=(12, 8))
+        img = Image.open(img_path)
+        plt.imshow(img)
+        plt.title(f"[{self.current_idx + 1}/{len(self.df)}] {row['filename']}")
+        plt.axis("off")
+        plt.show()
+
+        print(f"\n当前进度: {self.current_idx + 1}/{len(self.df)}")
+        print(f"文件名: {row['filename']}")
+
+    def annotate(self, type_name: str, airline_name: str,
+                 registration: str = "", quality: str = "good"):
+        """标注当前图片"""
+        self.df.loc[self.current_idx, "type_name"] = type_name
+        self.df.loc[self.current_idx, "airline_name"] = airline_name
+        self.df.loc[self.current_idx, "registration"] = registration
+        self.df.loc[self.current_idx, "quality"] = quality
+        self.df.loc[self.current_idx, "annotator"] = "manual"
+
+        self.current_idx += 1
+        self.save()
+        print(f"✓ 已标注，进度: {self.current_idx}/{len(self.df)}")
+
+    def skip(self):
+        """跳过当前图片"""
+        self.df.loc[self.current_idx, "notes"] = "skipped"
+        self.current_idx += 1
+        self.save()
+
+    def save(self):
+        """保存标注结果"""
+        self.df.to_csv(self.csv_path, index=False, encoding="utf-8-sig")
+
+    def print_options(self):
+        """打印可选项"""
+        print("\n=== 机型选项 ===")
+        for i, t in enumerate(self.type_options):
+            print(f"  {i}: {t}")
+        print("\n=== 航司选项 ===")
+        for i, a in enumerate(self.airline_options):
+            print(f"  {i}: {a}")
+
+# 使用示例
+if __name__ == "__main__":
+    helper = AnnotationHelper(
+        csv_path="data/labels/annotation_todo.csv",
+        image_dir="data/processed/aircraft_crop/unsorted"
+    )
+
+    # 交互式标注
+    while True:
+        helper.show_current()
+        helper.print_options()
+
+        cmd = input("\n输入 (type_idx airline_idx [reg] [quality]) 或 's'跳过, 'q'退出: ")
+        if cmd == 'q':
+            break
+        if cmd == 's':
+            helper.skip()
+            continue
+
+        parts = cmd.split()
+        if len(parts) >= 2:
+            type_name = helper.type_options[int(parts[0])]
+            airline_name = helper.airline_options[int(parts[1])]
+            reg = parts[2] if len(parts) > 2 else ""
+            quality = parts[3] if len(parts) > 3 else "good"
+            helper.annotate(type_name, airline_name, reg, quality)
+```
+
+### 阶段 3：注册号区域标注（目标检测）
+
+#### 3.1 使用 Label Studio
+
+```bash
+# 安装 Label Studio
+pip install label-studio
+
+# 启动
+label-studio start
+```
+
+**配置标注模板**：
+
+```xml
+<!-- Label Studio 配置：注册号区域检测 -->
+<View>
+  <Image name="image" value="$image"/>
+  <RectangleLabels name="label" toName="image">
+    <Label value="registration" background="#FF0000"/>
+    <Label value="airline_logo" background="#00FF00"/>
+    <Label value="aircraft_number" background="#0000FF"/>
+  </RectangleLabels>
+</View>
+```
+
+#### 3.2 使用 LabelImg（更轻量）
+
+```bash
+# 安装
+pip install labelImg
+
+# 启动
+labelImg data/processed/aircraft_crop/unsorted data/labels/classes.txt
+```
+
+**classes.txt 内容**：
+```
+registration
+airline_logo
+```
+
+#### 3.3 标注导出转换
+
+```python
+# scripts/convert_labelimg_to_csv.py
+"""将 LabelImg 的 YOLO 格式转换为训练用的 CSV"""
+import pandas as pd
+from pathlib import Path
+
+def convert_yolo_to_csv(label_dir: str, image_dir: str, output_csv: str):
+    """转换 YOLO 格式标注到 CSV"""
+    records = []
+    label_path = Path(label_dir)
+
+    for txt_file in label_path.glob("*.txt"):
+        image_name = txt_file.stem + ".jpg"
+
+        with open(txt_file) as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) == 5:
+                    class_id, x_center, y_center, width, height = parts
+                    records.append({
+                        "filename": image_name,
+                        "class_id": int(class_id),
+                        "x_center": float(x_center),
+                        "y_center": float(y_center),
+                        "width": float(width),
+                        "height": float(height)
+                    })
+
+    df = pd.DataFrame(records)
+    df.to_csv(output_csv, index=False)
+    print(f"Converted {len(records)} annotations to {output_csv}")
+```
+
+### 阶段 4：标注质量审核
+
+#### 4.1 审核流程
+
+```
+审核检查清单：
+□ 机型标注是否准确（抽查 20%）
+□ 航司标注是否匹配涂装
+□ 注册号是否正确（可通过网站验证）
+□ 边界框是否紧密包围目标
+□ 是否有遗漏标注
+□ 是否有重复图片
+```
+
+#### 4.2 自动化审核脚本
+
+```python
+# scripts/verify_annotations.py
+"""标注质量自动检查"""
+import pandas as pd
+from pathlib import Path
+from collections import Counter
+
+def verify_annotations(csv_path: str, image_dir: str):
+    """检查标注质量"""
+    df = pd.read_csv(csv_path)
+    issues = []
+
+    # 1. 检查空值
+    empty_type = df[df["type_name"].isna() | (df["type_name"] == "")]
+    if len(empty_type) > 0:
+        issues.append(f"⚠️ {len(empty_type)} 张图片缺少机型标注")
+
+    # 2. 检查图片是否存在
+    image_path = Path(image_dir)
+    for filename in df["filename"]:
+        if not (image_path / filename).exists():
+            issues.append(f"❌ 图片不存在: {filename}")
+
+    # 3. 检查类别分布是否均衡
+    type_counts = Counter(df["type_name"].dropna())
+    print("\n=== 机型分布 ===")
+    for type_name, count in type_counts.most_common():
+        bar = "█" * (count // 10)
+        print(f"  {type_name:15} {count:4} {bar}")
+
+    # 4. 检查是否有异常值
+    valid_types = ["A320", "A321", "A330-300", "A350-900", "A380",
+                   "B737-800", "B747-400", "B777-300ER", "B787-9",
+                   "ARJ21", "C919", "Unknown"]
+    invalid_types = df[~df["type_name"].isin(valid_types + ["", None])]["type_name"].unique()
+    if len(invalid_types) > 0:
+        issues.append(f"⚠️ 发现非标准机型名称: {list(invalid_types)}")
+
+    # 5. 检查重复图片
+    duplicates = df[df.duplicated(subset=["filename"], keep=False)]
+    if len(duplicates) > 0:
+        issues.append(f"❌ 发现 {len(duplicates)} 条重复记录")
+
+    # 打印问题
+    print("\n=== 审核结果 ===")
+    if issues:
+        for issue in issues:
+            print(issue)
+    else:
+        print("✅ 标注质量检查通过")
+
+    return len(issues) == 0
+
+if __name__ == "__main__":
+    verify_annotations(
+        csv_path="data/labels/annotation_todo.csv",
+        image_dir="data/processed/aircraft_crop/unsorted"
+    )
+```
+
+#### 4.3 交叉验证（多人标注）
+
+```python
+# scripts/cross_validate.py
+"""比较多个标注者的结果"""
+import pandas as pd
+
+def compare_annotations(csv1: str, csv2: str):
+    """比较两个标注者的结果"""
+    df1 = pd.read_csv(csv1)
+    df2 = pd.read_csv(csv2)
+
+    # 合并
+    merged = df1.merge(df2, on="filename", suffixes=("_a", "_b"))
+
+    # 计算一致性
+    type_agree = (merged["type_name_a"] == merged["type_name_b"]).mean()
+    airline_agree = (merged["airline_name_a"] == merged["airline_name_b"]).mean()
+
+    print(f"机型标注一致性: {type_agree:.1%}")
+    print(f"航司标注一致性: {airline_agree:.1%}")
+
+    # 找出不一致的样本
+    disagreements = merged[merged["type_name_a"] != merged["type_name_b"]]
+    print(f"\n不一致样本数: {len(disagreements)}")
+
+    if len(disagreements) > 0:
+        print("\n需要复核的图片:")
+        for _, row in disagreements.head(10).iterrows():
+            print(f"  {row['filename']}: {row['type_name_a']} vs {row['type_name_b']}")
+```
+
+### 阶段 5：标注数据导出
+
+#### 5.1 导出为训练格式
+
+```python
+# scripts/export_annotations.py
+"""将标注导出为训练所需的最终格式"""
+import pandas as pd
+import json
+from pathlib import Path
+import shutil
+
+def export_for_training(
+    annotation_csv: str,
+    image_dir: str,
+    output_dir: str,
+    train_ratio: float = 0.8,
+    val_ratio: float = 0.1
+):
+    """导出标注数据为训练格式"""
+    df = pd.read_csv(annotation_csv)
+
+    # 过滤掉未标注和质量差的
+    df = df[df["type_name"].notna() & (df["type_name"] != "")]
+    df = df[df["quality"] != "poor"]
+
+    print(f"有效样本数: {len(df)}")
+
+    # 创建类别映射
+    types = sorted(df["type_name"].unique())
+    airlines = sorted(df["airline_name"].dropna().unique())
+
+    type_to_id = {t: i for i, t in enumerate(types)}
+    airline_to_id = {a: i for i, a in enumerate(airlines)}
+
+    # 添加 ID 列
+    df["type_id"] = df["type_name"].map(type_to_id)
+    df["airline_id"] = df["airline_name"].map(airline_to_id)
+
+    # 随机打乱并划分
+    df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+    n = len(df)
+    train_end = int(n * train_ratio)
+    val_end = int(n * (train_ratio + val_ratio))
+
+    splits = {
+        "train": df[:train_end],
+        "val": df[train_end:val_end],
+        "test": df[val_end:]
+    }
+
+    # 创建输出目录
+    output_path = Path(output_dir)
+    image_path = Path(image_dir)
+
+    for split_name, split_df in splits.items():
+        # 创建目录结构
+        for type_name in types:
+            (output_path / split_name / type_name).mkdir(parents=True, exist_ok=True)
+
+        # 复制图片到对应目录
+        for _, row in split_df.iterrows():
+            src = image_path / row["filename"]
+            dst = output_path / split_name / row["type_name"] / row["filename"]
+            if src.exists():
+                shutil.copy(src, dst)
+
+        print(f"{split_name}: {len(split_df)} images")
+
+    # 保存类别映射
+    labels_dir = output_path / "labels"
+    labels_dir.mkdir(exist_ok=True)
+
+    with open(labels_dir / "type_classes.json", "w") as f:
+        json.dump({"classes": types, "num_classes": len(types)}, f, indent=2)
+
+    with open(labels_dir / "airline_classes.json", "w") as f:
+        json.dump({"classes": airlines, "num_classes": len(airlines)}, f, indent=2)
+
+    # 保存完整标注 CSV
+    df.to_csv(labels_dir / "aircraft_labels.csv", index=False)
+
+    print(f"\n✅ 导出完成: {output_path}")
+    print(f"   机型类别: {len(types)}")
+    print(f"   航司类别: {len(airlines)}")
+
+if __name__ == "__main__":
+    export_for_training(
+        annotation_csv="data/labels/annotation_todo.csv",
+        image_dir="data/processed/aircraft_crop/unsorted",
+        output_dir="data/processed/aircraft_crop"
+    )
+```
+
+### 标注效率建议
+
+| 任务类型 | 单人效率 | 建议策略 |
+|----------|----------|----------|
+| 机型分类 | 200-300 张/小时 | 用快捷键，预览+输入 |
+| 航司分类 | 300-400 张/小时 | 按涂装颜色分组 |
+| 注册号检测 | 80-120 张/小时 | 用 Label Studio 模板 |
+| 注册号 OCR | 150-200 张/小时 | 先检测后转录 |
+
+### 标注分工建议
+
+```
+小团队（1-2人）标注 5000 张图：
+├── 第 1 天：数据收集 + 预处理（500 张/人）
+├── 第 2-4 天：机型+航司标注（500 张/人/天）
+├── 第 5 天：交叉审核 + 修正
+├── 第 6 天：注册号区域标注
+└── 第 7 天：导出 + 验证
+
+预计总耗时：1 周
+```
 
 ---
 
