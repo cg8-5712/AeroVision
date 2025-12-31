@@ -794,311 +794,9 @@ uvicorn main:app --reload --port 8000
                                       └─────────────┘    └─────────────┘
 ```
 
-### 阶段 1：数据收集与预处理
+### 标注质量审核
 
-#### 1.1 图片下载与命名
-
-```python
-# scripts/download_images.py
-import requests
-from pathlib import Path
-import hashlib
-
-def download_and_rename(url: str, save_dir: str, prefix: str = ""):
-    """下载图片并用 hash 重命名避免重复"""
-    response = requests.get(url, timeout=30)
-    if response.status_code == 200:
-        # 用内容 hash 作为文件名
-        content_hash = hashlib.md5(response.content).hexdigest()[:12]
-        filename = f"{prefix}_{content_hash}.jpg" if prefix else f"{content_hash}.jpg"
-
-        save_path = Path(save_dir) / filename
-        save_path.write_bytes(response.content)
-        return str(save_path)
-    return None
-```
-
-#### 1.2 创建待标注清单
-
-```python
-# scripts/create_annotation_list.py
-import pandas as pd
-from pathlib import Path
-
-def create_annotation_csv(image_dir: str, output_csv: str):
-    """创建待标注的 CSV 文件"""
-    image_dir = Path(image_dir)
-
-    records = []
-    for img_path in sorted(image_dir.glob("*.jpg")):
-        records.append({
-            "filename": img_path.name,
-            "type_name": "",        # 待填写
-            "airline_name": "",     # 待填写
-            "registration": "",     # 待填写
-            "quality": "",          # 待填写: good/medium/poor
-            "annotator": "",        # 标注人
-            "verified": False,      # 是否已审核
-            "notes": ""             # 备注
-        })
-
-    df = pd.DataFrame(records)
-    df.to_csv(output_csv, index=False, encoding="utf-8-sig")  # utf-8-sig 支持 Excel 直接打开
-    print(f"Created annotation file: {output_csv} ({len(records)} images)")
-
-if __name__ == "__main__":
-    create_annotation_csv(
-        image_dir="data/processed/aircraft_crop/unsorted",
-        output_csv="data/labels/annotation_todo.csv"
-    )
-```
-
-### 阶段 2：机型/航司分类标注
-
-#### 2.1 标注指南
-
-```markdown
-## 机型标注规范
-
-### 命名规则
-- 使用 ICAO 型号代码简写
-- 同系列不同型号分开标注
-- 示例：
-  - ✅ B737-800（具体型号）
-  - ❌ B737（太笼统）
-  - ✅ A320-200
-  - ✅ A320neo（新发动机型号单独分类）
-
-### 常见易混淆机型
-| 机型 A | 机型 B | 区分方法 |
-|--------|--------|----------|
-| A320 | A321 | A321 更长，看舱门数量 |
-| B737-800 | B737-900 | 900 更长，看紧急出口位置 |
-| A330-200 | A330-300 | 300 更长 |
-| B777-200 | B777-300 | 300 明显更长 |
-| A350-900 | A350-1000 | 1000 更长，看起落架舱门 |
-
-### 标注原则
-1. **不确定就标"Unknown"** - 宁缺毋滥
-2. **参考注册号查询** - 用 flightradar24.com 或 planespotters.net
-3. **看翼尖小翼形状** - 不同机型小翼设计不同
-4. **看发动机数量和位置** - 双发/四发，翼下/尾部
-```
-
-#### 2.2 标注工具：Excel 批量标注
-
-```
-推荐工作流：
-
-1. 打开 annotation_todo.csv
-2. 使用图片查看器（如 IrfanView）批量预览图片
-3. 在 Excel 中逐行填写：
-   - type_name: 机型名称
-   - airline_name: 航空公司
-   - registration: 注册号（如果可见）
-   - quality: good / medium / poor
-4. 每 100 张保存一次
-5. 填写 annotator 字段（你的名字）
-```
-
-#### 2.3 辅助标注脚本（图片+表格联动）
-
-```python
-# scripts/annotation_helper.py
-"""
-简易标注辅助工具：显示图片 + 输入标签
-"""
-import pandas as pd
-from pathlib import Path
-from PIL import Image
-import matplotlib.pyplot as plt
-
-class AnnotationHelper:
-    def __init__(self, csv_path: str, image_dir: str):
-        self.csv_path = csv_path
-        self.image_dir = Path(image_dir)
-        self.df = pd.read_csv(csv_path)
-        self.current_idx = self._find_first_unlabeled()
-
-        # 预定义选项
-        self.type_options = [
-            "A320", "A321", "A330-300", "A350-900", "A380",
-            "B737-800", "B747-400", "B777-300ER", "B787-9",
-            "ARJ21", "C919", "Unknown"
-        ]
-        self.airline_options = [
-            "Air China", "China Eastern", "China Southern",
-            "Hainan Airlines", "Xiamen Airlines", "Spring Airlines",
-            "Cathay Pacific", "Singapore Airlines", "Emirates",
-            "Unknown"
-        ]
-
-    def _find_first_unlabeled(self) -> int:
-        """找到第一个未标注的图片"""
-        for idx, row in self.df.iterrows():
-            if pd.isna(row["type_name"]) or row["type_name"] == "":
-                return idx
-        return len(self.df)
-
-    def show_current(self):
-        """显示当前图片"""
-        if self.current_idx >= len(self.df):
-            print("All images annotated!")
-            return
-
-        row = self.df.iloc[self.current_idx]
-        img_path = self.image_dir / row["filename"]
-
-        plt.figure(figsize=(12, 8))
-        img = Image.open(img_path)
-        plt.imshow(img)
-        plt.title(f"[{self.current_idx + 1}/{len(self.df)}] {row['filename']}")
-        plt.axis("off")
-        plt.show()
-
-        print(f"\n当前进度: {self.current_idx + 1}/{len(self.df)}")
-        print(f"文件名: {row['filename']}")
-
-    def annotate(self, type_name: str, airline_name: str,
-                 registration: str = "", quality: str = "good"):
-        """标注当前图片"""
-        self.df.loc[self.current_idx, "type_name"] = type_name
-        self.df.loc[self.current_idx, "airline_name"] = airline_name
-        self.df.loc[self.current_idx, "registration"] = registration
-        self.df.loc[self.current_idx, "quality"] = quality
-        self.df.loc[self.current_idx, "annotator"] = "manual"
-
-        self.current_idx += 1
-        self.save()
-        print(f"✓ 已标注，进度: {self.current_idx}/{len(self.df)}")
-
-    def skip(self):
-        """跳过当前图片"""
-        self.df.loc[self.current_idx, "notes"] = "skipped"
-        self.current_idx += 1
-        self.save()
-
-    def save(self):
-        """保存标注结果"""
-        self.df.to_csv(self.csv_path, index=False, encoding="utf-8-sig")
-
-    def print_options(self):
-        """打印可选项"""
-        print("\n=== 机型选项 ===")
-        for i, t in enumerate(self.type_options):
-            print(f"  {i}: {t}")
-        print("\n=== 航司选项 ===")
-        for i, a in enumerate(self.airline_options):
-            print(f"  {i}: {a}")
-
-# 使用示例
-if __name__ == "__main__":
-    helper = AnnotationHelper(
-        csv_path="data/labels/annotation_todo.csv",
-        image_dir="data/processed/aircraft_crop/unsorted"
-    )
-
-    # 交互式标注
-    while True:
-        helper.show_current()
-        helper.print_options()
-
-        cmd = input("\n输入 (type_idx airline_idx [reg] [quality]) 或 's'跳过, 'q'退出: ")
-        if cmd == 'q':
-            break
-        if cmd == 's':
-            helper.skip()
-            continue
-
-        parts = cmd.split()
-        if len(parts) >= 2:
-            type_name = helper.type_options[int(parts[0])]
-            airline_name = helper.airline_options[int(parts[1])]
-            reg = parts[2] if len(parts) > 2 else ""
-            quality = parts[3] if len(parts) > 3 else "good"
-            helper.annotate(type_name, airline_name, reg, quality)
-```
-
-### 阶段 3：注册号区域标注（目标检测）
-
-#### 3.1 使用 Label Studio
-
-```bash
-# 安装 Label Studio
-pip install label-studio
-
-# 启动
-label-studio start
-```
-
-**配置标注模板**：
-
-```xml
-<!-- Label Studio 配置：注册号区域检测 -->
-<View>
-  <Image name="image" value="$image"/>
-  <RectangleLabels name="label" toName="image">
-    <Label value="registration" background="#FF0000"/>
-    <Label value="airline_logo" background="#00FF00"/>
-    <Label value="aircraft_number" background="#0000FF"/>
-  </RectangleLabels>
-</View>
-```
-
-#### 3.2 使用 LabelImg（更轻量）
-
-```bash
-# 安装
-pip install labelImg
-
-# 启动
-labelImg data/processed/aircraft_crop/unsorted data/labels/classes.txt
-```
-
-**classes.txt 内容**：
-```
-registration
-airline_logo
-```
-
-#### 3.3 标注导出转换
-
-```python
-# scripts/convert_labelimg_to_csv.py
-"""将 LabelImg 的 YOLO 格式转换为训练用的 CSV"""
-import pandas as pd
-from pathlib import Path
-
-def convert_yolo_to_csv(label_dir: str, image_dir: str, output_csv: str):
-    """转换 YOLO 格式标注到 CSV"""
-    records = []
-    label_path = Path(label_dir)
-
-    for txt_file in label_path.glob("*.txt"):
-        image_name = txt_file.stem + ".jpg"
-
-        with open(txt_file) as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) == 5:
-                    class_id, x_center, y_center, width, height = parts
-                    records.append({
-                        "filename": image_name,
-                        "class_id": int(class_id),
-                        "x_center": float(x_center),
-                        "y_center": float(y_center),
-                        "width": float(width),
-                        "height": float(height)
-                    })
-
-    df = pd.DataFrame(records)
-    df.to_csv(output_csv, index=False)
-    print(f"Converted {len(records)} annotations to {output_csv}")
-```
-
-### 阶段 4：标注质量审核
-
-#### 4.1 审核流程
+#### 审核流程
 
 ```
 审核检查清单：
@@ -1108,9 +806,10 @@ def convert_yolo_to_csv(label_dir: str, image_dir: str, output_csv: str):
 □ 边界框是否紧密包围目标
 □ 是否有遗漏标注
 □ 是否有重复图片
+□ quality 分数是否合理（清晰图 > 0.8，模糊图 < 0.5）
 ```
 
-#### 4.2 自动化审核脚本
+#### 自动化审核脚本
 
 ```python
 # scripts/verify_annotations.py
@@ -1155,6 +854,12 @@ def verify_annotations(csv_path: str, image_dir: str):
     if len(duplicates) > 0:
         issues.append(f"❌ 发现 {len(duplicates)} 条重复记录")
 
+    # 6. 检查 quality 范围
+    if "quality" in df.columns:
+        invalid_quality = df[(df["quality"] < 0) | (df["quality"] > 1)]
+        if len(invalid_quality) > 0:
+            issues.append(f"⚠️ {len(invalid_quality)} 条记录的 quality 不在 0-1 范围内")
+
     # 打印问题
     print("\n=== 审核结果 ===")
     if issues:
@@ -1167,12 +872,12 @@ def verify_annotations(csv_path: str, image_dir: str):
 
 if __name__ == "__main__":
     verify_annotations(
-        csv_path="data/labels/annotation_todo.csv",
+        csv_path="data/labels/aircraft_labels.csv",
         image_dir="data/processed/aircraft_crop/unsorted"
     )
 ```
 
-#### 4.3 交叉验证（多人标注）
+#### 交叉验证（多人标注）
 
 ```python
 # scripts/cross_validate.py
@@ -1204,98 +909,34 @@ def compare_annotations(csv1: str, csv2: str):
             print(f"  {row['filename']}: {row['type_name_a']} vs {row['type_name_b']}")
 ```
 
-### 阶段 5：标注数据导出
+### 机型标注指南
 
-#### 5.1 导出为训练格式
+```markdown
+## 机型标注规范
 
-```python
-# scripts/export_annotations.py
-"""将标注导出为训练所需的最终格式"""
-import pandas as pd
-import json
-from pathlib import Path
-import shutil
+### 命名规则
+- 使用 ICAO 型号代码简写
+- 同系列不同型号分开标注
+- 示例：
+  - ✅ B737-800（具体型号）
+  - ❌ B737（太笼统）
+  - ✅ A320-200
+  - ✅ A320neo（新发动机型号单独分类）
 
-def export_for_training(
-    annotation_csv: str,
-    image_dir: str,
-    output_dir: str,
-    train_ratio: float = 0.8,
-    val_ratio: float = 0.1
-):
-    """导出标注数据为训练格式"""
-    df = pd.read_csv(annotation_csv)
+### 常见易混淆机型
+| 机型 A | 机型 B | 区分方法 |
+|--------|--------|----------|
+| A320 | A321 | A321 更长，看舱门数量 |
+| B737-800 | B737-900 | 900 更长，看紧急出口位置 |
+| A330-200 | A330-300 | 300 更长 |
+| B777-200 | B777-300 | 300 明显更长 |
+| A350-900 | A350-1000 | 1000 更长，看起落架舱门 |
 
-    # 过滤掉未标注和质量差的
-    df = df[df["type_name"].notna() & (df["type_name"] != "")]
-    df = df[df["quality"] != "poor"]
-
-    print(f"有效样本数: {len(df)}")
-
-    # 创建类别映射
-    types = sorted(df["type_name"].unique())
-    airlines = sorted(df["airline_name"].dropna().unique())
-
-    type_to_id = {t: i for i, t in enumerate(types)}
-    airline_to_id = {a: i for i, a in enumerate(airlines)}
-
-    # 添加 ID 列
-    df["type_id"] = df["type_name"].map(type_to_id)
-    df["airline_id"] = df["airline_name"].map(airline_to_id)
-
-    # 随机打乱并划分
-    df = df.sample(frac=1, random_state=42).reset_index(drop=True)
-    n = len(df)
-    train_end = int(n * train_ratio)
-    val_end = int(n * (train_ratio + val_ratio))
-
-    splits = {
-        "train": df[:train_end],
-        "val": df[train_end:val_end],
-        "test": df[val_end:]
-    }
-
-    # 创建输出目录
-    output_path = Path(output_dir)
-    image_path = Path(image_dir)
-
-    for split_name, split_df in splits.items():
-        # 创建目录结构
-        for type_name in types:
-            (output_path / split_name / type_name).mkdir(parents=True, exist_ok=True)
-
-        # 复制图片到对应目录
-        for _, row in split_df.iterrows():
-            src = image_path / row["filename"]
-            dst = output_path / split_name / row["type_name"] / row["filename"]
-            if src.exists():
-                shutil.copy(src, dst)
-
-        print(f"{split_name}: {len(split_df)} images")
-
-    # 保存类别映射
-    labels_dir = output_path / "labels"
-    labels_dir.mkdir(exist_ok=True)
-
-    with open(labels_dir / "type_classes.json", "w") as f:
-        json.dump({"classes": types, "num_classes": len(types)}, f, indent=2)
-
-    with open(labels_dir / "airline_classes.json", "w") as f:
-        json.dump({"classes": airlines, "num_classes": len(airlines)}, f, indent=2)
-
-    # 保存完整标注 CSV
-    df.to_csv(labels_dir / "aircraft_labels.csv", index=False)
-
-    print(f"\n✅ 导出完成: {output_path}")
-    print(f"   机型类别: {len(types)}")
-    print(f"   航司类别: {len(airlines)}")
-
-if __name__ == "__main__":
-    export_for_training(
-        annotation_csv="data/labels/annotation_todo.csv",
-        image_dir="data/processed/aircraft_crop/unsorted",
-        output_dir="data/processed/aircraft_crop"
-    )
+### 标注原则
+1. **不确定就标"Unknown"** - 宁缺毋滥
+2. **参考注册号查询** - 用 flightradar24.com 或 planespotters.net
+3. **看翼尖小翼形状** - 不同机型小翼设计不同
+4. **看发动机数量和位置** - 双发/四发，翼下/尾部
 ```
 
 ### 标注效率建议
@@ -1306,19 +947,6 @@ if __name__ == "__main__":
 | 航司分类 | 300-400 张/小时 | 按涂装颜色分组 |
 | 注册号检测 | 80-120 张/小时 | 用 Label Studio 模板 |
 | 注册号 OCR | 150-200 张/小时 | 先检测后转录 |
-
-### 标注分工建议
-
-```
-小团队（1-2人）标注 5000 张图：
-├── 第 1 天：数据收集 + 预处理（500 张/人）
-├── 第 2-4 天：机型+航司标注（500 张/人/天）
-├── 第 5 天：交叉审核 + 修正
-├── 第 6 天：注册号区域标注
-└── 第 7 天：导出 + 验证
-
-预计总耗时：1 周
-```
 
 ---
 
